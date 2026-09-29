@@ -17,7 +17,6 @@ urlpatterns = [
 
     # Cart
     path('api/cart/', cart_views.CartView.as_view(), name='cart'),
-    path('api/checkout/', cart_views.CheckoutView.as_view(), name='checkout'),
     path('api/cart/items/<int:pk>/', cart_views.CartItemUpdateDelete.as_view(), name='cart-item-update'),
 
     # Checkout, Payment & Orders

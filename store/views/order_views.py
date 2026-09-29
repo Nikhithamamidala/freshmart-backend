@@ -6,61 +6,122 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
-from ..models import Order, OrderItem, Cart, Payment
+from ..models import Order, OrderItem, Cart, Payment, Address
 from ..serializers import OrderSerializer
+
 
 # 7. CHECKOUT MODULE
 class CheckoutView(APIView):
     permission_classes = [IsAuthenticated]
+
     @transaction.atomic
     def post(self, request):
         cart = get_object_or_404(Cart, user=request.user)
-        if not cart.items.exists(): return Response({"error": "Cart is empty"}, status=400)
-        
+
+        if not cart.items.exists():
+            return Response({"error": "Cart is empty"}, status=400)
+
+        # Step 1: Create the Address from the checkout form data
+        address = Address.objects.create(
+            user=request.user,
+            full_name=request.data.get('full_name', ''),
+            phone=request.data.get('mobile_number', ''),
+            address=request.data.get('shipping_address', ''),
+            city=request.data.get('city', ''),
+            state=request.data.get('state', ''),
+            pincode=request.data.get('pincode', '')
+        )
+
+        # Step 2: Calculate total, check stock, and prepare items
         total = 0
         order_items_data = []
-        
+
         for item in cart.items.all():
-            if item.product.stock < item.quantity: return Response({"error": f"Insufficient stock for {item.product.name}"}, status=400)
-            total += item.product.price * item.quantity
-            order_items_data.append({'product': item.product, 'quantity': item.quantity, 'price_at_purchase': item.product.price})
-            # Deduct stock
-            item.product.stock -= item.quantity
+            # NOTE: New field name is stock_quantity (not stock)
+            if item.product.stock_quantity < item.quantity:
+                return Response(
+                    {"error": f"Insufficient stock for {item.product.product_name}"},
+                    status=400
+                )
+
+            item_total = item.product.price * item.quantity
+            total += item_total
+
+            order_items_data.append({
+                'product': item.product,
+                'quantity': item.quantity,
+                'unit_price': item.product.price,
+                'total_price': item_total
+            })
+
+            # Deduct stock (new field name)
+            item.product.stock_quantity -= item.quantity
             item.product.save()
-            
-        # ⭐ UPDATED LINE BELOW: Added full_name and mobile_number from the frontend data
+
+        # Step 3: Create the Order (new field names: address, total_amt)
         order = Order.objects.create(
-            user=request.user, 
-            full_name=request.data.get('full_name', ''), 
-            mobile_number=request.data.get('mobile_number', ''), 
-            shipping_address=request.data['shipping_address'], 
-            payment_method=request.data['payment_method'], 
-            total_amount=total, 
-            final_amount=total
+            user=request.user,
+            address=address,
+            total_amt=total,
+            status='pending'
         )
-        
-        for data in order_items_data: OrderItem.objects.create(order=order, **data)
+
+        # Step 4: Create OrderItems
+        for data in order_items_data:
+            OrderItem.objects.create(order=order, **data)
+
+        # Step 5: Clear the cart
         cart.items.all().delete()
+
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+
 
 # 8. PAYMENT MODULE
 class PaymentView(APIView):
     permission_classes = [IsAuthenticated]
+
     def post(self, request):
-        order = get_object_or_404(Order, id=request.data.get('order_id'), user=request.user)
-        payment, created = Payment.objects.get_or_create(order=order, defaults={'payment_status': 'paid', 'transaction_id': 'MOCK-TXN-123', 'paid_at': timezone.now()})
-        if not created: payment.payment_status = 'paid'; payment.save()
+        order = get_object_or_404(
+            Order,
+            id=request.data.get('order_id'),
+            user=request.user
+        )
+        payment, created = Payment.objects.get_or_create(
+            order=order,
+            defaults={
+                'payment_status': 'paid',
+                'transaction_id': 'MOCK-TXN-123',
+                'paid_at': timezone.now(),
+                'payment_method': request.data.get('payment_method', 'COD'),
+                'amount': order.total_amt
+            }
+        )
+        if not created:
+            payment.payment_status = 'paid'
+            payment.save()
+
         order.status = 'processing'
         order.save()
-        return Response({"message": "Payment Successful!", "order_id": order.id, "status": order.status})
+
+        return Response({
+            "message": "Payment Successful!",
+            "order_id": order.id,
+            "status": order.status
+        })
+
 
 # 9. MY ORDERS & DETAILS
 class OrderList(ListAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
-    def get_queryset(self): return Order.objects.filter(user=self.request.user)
+
+    def get_queryset(self):
+        return Order.objects.filter(user=self.request.user)
+
 
 class OrderDetail(RetrieveAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
-    def get_queryset(self): return Order.objects.filter(user=self.request.user)
+
+    def get_queryset(self):
+        return Order.objects.filter(user=self.request.user)
